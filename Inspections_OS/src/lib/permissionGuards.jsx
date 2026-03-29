@@ -66,6 +66,17 @@ export function GuardedRoute({
   const decision = usePermissionDecision(action, scope);
 
   if (decision.result !== "allowed") {
+    if (location.pathname === fallbackPath) {
+      return (
+        <div className="card">
+          <h2 className="title">Access denied</h2>
+          <p className="small">
+            {decision.result}: {decision.reason}
+          </p>
+          <p className="small">Action: {action}</p>
+        </div>
+      );
+    }
     return (
       <Navigate
         to={fallbackPath}

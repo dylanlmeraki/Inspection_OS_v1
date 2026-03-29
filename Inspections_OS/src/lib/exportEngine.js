@@ -12,7 +12,7 @@ import { buildWizardPlan } from "@/lib/wizardAbstractionService";
  */
 function resolveManifestSourceEntries(evaluation) {
   const sourceIds = evaluation.sourceRecordIdsUsed || [];
-  return sourceIds
+  const entries = sourceIds
     .map((sourceRecordId) => localDb.getSourceRecordById(sourceRecordId))
     .filter(Boolean)
     .map((src) => ({
@@ -25,6 +25,26 @@ function resolveManifestSourceEntries(evaluation) {
       lastSeenAt: src.lastSeenAt,
       stale: src.stale,
     }));
+  return entries;
+}
+
+/**
+ * @param {ReadonlyArray<Record<string, unknown>> | null | undefined} entries
+ */
+function normalizeManifestSourceEntries(entries) {
+  return (entries || []).map((entry) => ({
+    sourceRecordId: typeof entry.sourceRecordId === "string" ? entry.sourceRecordId : "",
+    title: typeof entry.title === "string" ? entry.title : "Unknown source",
+    packetRole: typeof entry.packetRole === "string" ? entry.packetRole : "source_reference",
+    verificationStatus:
+      typeof entry.verificationStatus === "string"
+        ? entry.verificationStatus
+        : "gap-note",
+    fingerprintHash: typeof entry.fingerprintHash === "string" ? entry.fingerprintHash : "",
+    verifiedAt: typeof entry.verifiedAt === "string" ? entry.verifiedAt : undefined,
+    lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : undefined,
+    stale: Boolean(entry.stale),
+  }));
 }
 
 /**
@@ -171,6 +191,7 @@ function buildAssemblyGraph(plan, evaluation) {
  *  run: Record<string, unknown>
  *  transitionAttempt?: import("@/contracts/types").TransitionAttempt | null
  *  attachments?: ReadonlyArray<Record<string, unknown>>
+ *  sourceEntriesOverride?: ReadonlyArray<Record<string, unknown>> | null
  * }} input
  */
 export function buildVerificationManifest({
@@ -180,9 +201,12 @@ export function buildVerificationManifest({
   run,
   transitionAttempt = null,
   attachments = [],
+  sourceEntriesOverride = null,
 }) {
   const evidenceItems = normalizeEvidenceItems(attachments);
-  const sourceEntries = resolveManifestSourceEntries(evaluation);
+  const sourceEntries = normalizeManifestSourceEntries(
+    sourceEntriesOverride || resolveManifestSourceEntries(evaluation)
+  );
 
   return {
     manifestId: createManifestId(),
@@ -303,6 +327,7 @@ function normalizeExportInput(input) {
     run,
     evaluation,
     stageGateEvaluationId: stageEvaluation?.id || input.stageGateEvaluationId || null,
+    sourceEntriesSnapshot: stageEvaluation?.sourceEntriesSnapshot || null,
     transitionAttemptId: transitionAttempt?.attemptId || null,
     transitionAttempt,
     attachments: input.attachments || run.attachments || [],
@@ -326,6 +351,7 @@ export async function createExportJob(input) {
     evaluation,
     run,
     stageGateEvaluationId,
+    sourceEntriesSnapshot,
     transitionAttemptId,
     transitionAttempt,
     attachments,
@@ -348,6 +374,7 @@ export async function createExportJob(input) {
     run,
     transitionAttempt,
     attachments,
+    sourceEntriesOverride: sourceEntriesSnapshot,
   });
 
   const manifestRecord = localDb.createManifest(manifest);

@@ -246,12 +246,27 @@ export default function WizardRunner() {
       generatedAt: new Date().toISOString(),
     });
 
+    const sourceEntriesSnapshot = (nextEvaluation.sourceRecordIdsUsed || [])
+      .map((sourceRecordId) => localDb.getSourceRecordById(sourceRecordId))
+      .filter(Boolean)
+      .map((source) => ({
+        sourceRecordId: source.id,
+        title: source.title,
+        packetRole: source.packetRole,
+        verificationStatus: source.verificationStatus,
+        fingerprintHash: source.fingerprintHash,
+        verifiedAt: source.verifiedAt,
+        lastSeenAt: source.lastSeenAt,
+        stale: source.stale,
+      }));
+
     const stageEvaluationRecord = localDb.createStageGateEvaluation({
       runId: run.id,
       context: plan.context,
       evaluation: nextEvaluation,
       ruleSnapshotId: nextEvaluation.ruleSnapshotId,
       sourceRecordIdsUsed: nextEvaluation.sourceRecordIdsUsed,
+      sourceEntriesSnapshot,
     });
 
     const waiverEligible =

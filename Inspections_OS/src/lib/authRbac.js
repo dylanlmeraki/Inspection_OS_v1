@@ -56,6 +56,14 @@ function getMembership(userId, projectId) {
 }
 
 /**
+ * @param {string | null | undefined} userId
+ */
+function listMemberships(userId) {
+  if (!userId) return [];
+  return localDb.listProjectMemberships().filter((item) => item.userId === userId);
+}
+
+/**
  * @param {{
  *   actor: { userId: string, orgRole: string | null }
  *   action: string
@@ -74,9 +82,18 @@ function getMembership(userId, projectId) {
 export function evaluatePermission(input) {
   const scope = input.scope || {};
   const policy = scope.policy || {};
-  const membership = getMembership(input.actor.userId, scope.projectId || null);
+  const memberships = listMemberships(input.actor.userId);
+  const membership = scope.projectId
+    ? getMembership(input.actor.userId, scope.projectId || null)
+    : null;
   const orgRole = input.actor.orgRole;
   const projectRole = membership?.projectRole || null;
+  const hasScopedMembership = Boolean(membership);
+  const hasProjectRole = (roles) => {
+    if (scope.projectId) return roles.includes(String(projectRole));
+    return memberships.some((item) => roles.includes(String(item.projectRole)));
+  };
+  const anyMembershipCanWaive = memberships.some((item) => Boolean(item.canWaive));
 
   const allow = (reason = "allowed") => ({
     result: "allowed",
@@ -114,52 +131,53 @@ export function evaluatePermission(input) {
       ) {
         return allow("Org role may view dashboard.");
       }
-      if (["project_manager", "reviewer", "coordinator"].includes(String(projectRole))) {
+      if (hasProjectRole(["project_manager", "reviewer", "coordinator"])) {
         return allow("Project role may view dashboard.");
       }
-      if (projectRole === "inspector") {
+      if (hasProjectRole(["inspector"])) {
         if (dashboardSection === "my_work" || dashboardSection === "root") {
           return allow("Inspector may view limited my-work dashboard.");
         }
         return denyScope("Inspector dashboard scope is limited to my-work.");
       }
-      if (projectRole === "external_reviewer")
+      if (hasProjectRole(["external_reviewer"]))
         return denyRole("External reviewer cannot view dashboard.");
-      if (projectRole === "read_only_stakeholder" && policy.allowReadOnlyDashboard) {
-        return allow("Read-only stakeholder granted dashboard access.");
+      if (hasProjectRole(["read_only_stakeholder"])) {
+        if (policy.allowReadOnlyDashboard) {
+          return allow("Read-only stakeholder granted dashboard access.");
+        }
+        return denyScope("Read-only stakeholder dashboard requires explicit grant.");
       }
       return denyRole("Role cannot view dashboard.");
     }
     case PERMISSION_ACTIONS.viewProjectWorkspace: {
       if (ORG_ROLES.includes(String(orgRole)))
         return allow("Org role may view project workspace.");
-      if (
-        projectRole &&
-        projectRole !== "read_only_stakeholder" &&
-        projectRole !== "external_reviewer"
-      ) {
+      if (hasProjectRole(["project_manager", "reviewer", "inspector", "coordinator"])) {
         return allow("Project member may view project workspace.");
       }
-      if (projectRole === "external_reviewer") {
+      if (hasProjectRole(["external_reviewer"])) {
         if (policy.allowExternalProjectAccess)
           return allow("External reviewer granted project access.");
         return denyScope("External reviewer has no explicit project grant.");
       }
-      if (projectRole === "read_only_stakeholder") {
+      if (hasProjectRole(["read_only_stakeholder"])) {
         if (policy.allowReadOnlyProjectAccess)
           return allow("Read-only stakeholder granted project access.");
         return denyScope("Read-only stakeholder has no explicit project grant.");
       }
-      return denyMembership("Project membership required.");
+      if (scope.projectId && !hasScopedMembership) {
+        return denyMembership("Project membership required.");
+      }
+      return denyRole("Role cannot view project workspace.");
     }
     case PERMISSION_ACTIONS.submitInspectionRun: {
       if (ORG_ROLES.includes(String(orgRole))) return allow("Org role may submit run.");
-      if (
-        ["inspector", "reviewer", "project_manager", "coordinator"].includes(
-          String(projectRole)
-        )
-      ) {
+      if (hasProjectRole(["inspector", "reviewer", "project_manager", "coordinator"])) {
         return allow("Project role may submit run.");
+      }
+      if (scope.projectId && !hasScopedMembership) {
+        return denyMembership("Project membership required.");
       }
       return denyRole("Role cannot submit inspection run.");
     }
@@ -171,20 +189,22 @@ export function evaluatePermission(input) {
       ) {
         return allow("Org/compliance/operations role may approve or return run.");
       }
-      if (["reviewer", "project_manager"].includes(String(projectRole))) {
+      if (hasProjectRole(["reviewer", "project_manager"])) {
         return allow("Reviewer/project manager may approve or return run.");
+      }
+      if (scope.projectId && !hasScopedMembership) {
+        return denyMembership("Project membership required.");
       }
       return denyRole("Role cannot approve or return run.");
     }
     case PERMISSION_ACTIONS.createEditIssue: {
       if (ORG_ROLES.includes(String(orgRole)))
         return allow("Org role may create or edit issue.");
-      if (
-        ["inspector", "reviewer", "coordinator", "project_manager"].includes(
-          String(projectRole)
-        )
-      ) {
+      if (hasProjectRole(["inspector", "reviewer", "coordinator", "project_manager"])) {
         return allow("Project role may create or edit issue.");
+      }
+      if (scope.projectId && !hasScopedMembership) {
+        return denyMembership("Project membership required.");
       }
       return denyRole("Role cannot create/edit issues.");
     }
@@ -196,23 +216,29 @@ export function evaluatePermission(input) {
       ) {
         return allow("Org/compliance/operations role may close issue with evidence.");
       }
-      if (["reviewer", "project_manager"].includes(String(projectRole))) {
+      if (hasProjectRole(["reviewer", "project_manager"])) {
         return allow("Reviewer/project manager may close issue with evidence.");
       }
-      if (projectRole === "inspector") {
+      if (hasProjectRole(["inspector"])) {
         if (policy.allowInspectorIssueClose)
           return allow("Inspector allowed by project policy.");
         return denyPolicy(
           "Inspector closeout requires explicit project policy."
         );
       }
+      if (scope.projectId && !hasScopedMembership) {
+        return denyMembership("Project membership required.");
+      }
       return denyRole("Role cannot close issue with verification evidence.");
     }
     case PERMISSION_ACTIONS.attemptStageAdvancement: {
       if (ORG_ROLES.includes(String(orgRole)))
         return allow("Org role may attempt stage advancement.");
-      if (["inspector", "reviewer", "project_manager"].includes(String(projectRole))) {
+      if (hasProjectRole(["inspector", "reviewer", "project_manager"])) {
         return allow("Project role may attempt stage advancement.");
+      }
+      if (scope.projectId && !hasScopedMembership) {
+        return denyMembership("Project membership required.");
       }
       return denyRole("Role cannot attempt stage advancement.");
     }
@@ -220,11 +246,17 @@ export function evaluatePermission(input) {
       if (hasOrgAdminPower(orgRole) || orgRole === "compliance_admin") {
         return allow("Compliance/org role may waive blocker.");
       }
-      if (projectRole === "project_manager") {
-        if (policy.allowProjectManagerWaive || membership?.canWaive) {
+      if (hasProjectRole(["project_manager"])) {
+        const hasWaiverAuthority = scope.projectId
+          ? Boolean(membership?.canWaive)
+          : anyMembershipCanWaive;
+        if (policy.allowProjectManagerWaive || hasWaiverAuthority) {
           return allow("Project manager has explicit waiver authority.");
         }
         return denyPolicy("Project manager waiver authority is not enabled.");
+      }
+      if (scope.projectId && !hasScopedMembership) {
+        return denyMembership("Project membership required.");
       }
       return denyRole("Role cannot waive blocker.");
     }
@@ -255,8 +287,11 @@ export function evaluatePermission(input) {
     case PERMISSION_ACTIONS.triggerExternalShareExport: {
       if (hasOrgAdminPower(orgRole) || orgRole === "compliance_admin")
         return allow("Role may share exports externally.");
-      if (["reviewer", "project_manager"].includes(String(projectRole)))
+      if (hasProjectRole(["reviewer", "project_manager"]))
         return allow("Role may share exports externally.");
+      if (scope.projectId && !hasScopedMembership) {
+        return denyMembership("Project membership required.");
+      }
       return denyRole("Role cannot trigger external export sharing.");
     }
     case PERMISSION_ACTIONS.manageUsersRolesOrgSettings: {

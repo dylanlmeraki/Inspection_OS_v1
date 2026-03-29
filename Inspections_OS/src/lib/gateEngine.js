@@ -14,17 +14,63 @@ function stableHash(value) {
   return hash.toString(16).padStart(8, "0");
 }
 
+function canonicalizeArray(values) {
+  return (Array.isArray(values) ? values.slice() : [])
+    .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function canonicalizeRulesForSnapshot(rules) {
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => ({
+      id: rule.id,
+      scopeLevel: rule.scopeLevel || null,
+      scopeKey: rule.scopeKey || null,
+      priority: rule.priority ?? null,
+      mergeKey: rule.mergeKey || null,
+      mergeStrategy: rule.mergeStrategy || "replace",
+      severity: rule.severity || "blocker",
+      blockerCode: rule.blockerCode || null,
+      packetRole: rule.packetRole || null,
+      effectiveFrom: rule.effectiveFrom || null,
+      effectiveTo: rule.effectiveTo || null,
+      supersedes: canonicalizeArray(rule.supersedes),
+      requiredFields: canonicalizeArray(rule.requiredFields),
+      requiredQuestions: canonicalizeArray(rule.requiredQuestions),
+      requiredDocuments: canonicalizeArray(rule.requiredDocuments),
+      requiredSourceRecordIds: canonicalizeArray(rule.requiredSourceRecordIds),
+      requiredAttachments: canonicalizeArray(rule.requiredAttachments),
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function canonicalizeSourcesForSnapshot(sourceRecords) {
+  return (Array.isArray(sourceRecords) ? sourceRecords : [])
+    .map((source) => ({
+      id: source.id,
+      verificationStatus: source.verificationStatus || null,
+      fingerprintHash: source.fingerprintHash || null,
+      verifiedAt: source.verifiedAt || null,
+      lastSeenAt: source.lastSeenAt || null,
+      stale: Boolean(source.stale),
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
 function createRuleSnapshotId(plan) {
-  const ruleIds = plan.rules.map((rule) => rule.id).sort().join("|") || "no-rules";
-  const sourceIds = plan.sourceRecordIds.slice().sort().join("|") || "no-sources";
-  const serialized = [
-    plan.context.jurisdictionKey,
-    plan.context.programFamilyKey,
-    plan.context.inspectionTypeCode,
-    plan.context.workflowStageCode,
-    ruleIds,
-    sourceIds,
-  ].join("::");
+  const serialized = JSON.stringify({
+    context: {
+      jurisdictionKey: plan.context.jurisdictionKey,
+      countyGroup: plan.context.countyGroup,
+      projectId: plan.context.projectId,
+      programFamilyKey: plan.context.programFamilyKey,
+      inspectionTypeCode: plan.context.inspectionTypeCode,
+      workflowStageCode: plan.context.workflowStageCode,
+      evaluationDate: plan.context.evaluationDate || null,
+    },
+    rules: canonicalizeRulesForSnapshot(plan.rules),
+    sourceRecords: canonicalizeSourcesForSnapshot(plan.sourceRecords),
+  });
   return `rs_${stableHash(serialized)}`;
 }
 
@@ -45,6 +91,28 @@ function buildRequirementKey(type, key) {
 
 function toRequiredQuestionMet(value) {
   return value === true || value === "yes" || value === "confirmed";
+}
+
+/**
+ * @param {Array<Record<string, unknown>>} rules
+ * @param {"requiredFields"|"requiredQuestions"|"requiredDocuments"} key
+ */
+function buildRequirementSeverityMap(rules, key) {
+  const severityByKey = new Map();
+  (rules || []).forEach((rule) => {
+    const severity = rule.severity === "warning" ? "warning" : "blocker";
+    const requirementKeys = Array.isArray(rule[key]) ? rule[key] : [];
+    requirementKeys.forEach((item) => {
+      if (typeof item !== "string") return;
+      const existing = severityByKey.get(item);
+      if (existing === "blocker" || severity === "blocker") {
+        severityByKey.set(item, "blocker");
+      } else {
+        severityByKey.set(item, "warning");
+      }
+    });
+  });
+  return severityByKey;
 }
 
 /**
@@ -93,15 +161,19 @@ export function evaluateGate({
   const blockers = [];
   /** @type {import("@/contracts/types").GateBlocker[]} */
   const warnings = [];
+  const fieldSeverityMap = buildRequirementSeverityMap(plan.rules, "requiredFields");
+  const questionSeverityMap = buildRequirementSeverityMap(plan.rules, "requiredQuestions");
+  const documentSeverityMap = buildRequirementSeverityMap(plan.rules, "requiredDocuments");
 
   for (const key of plan.requiredFieldKeys) {
     const value = getValue(merged, key);
     const met = evaluateValuePresence(value);
+    const severity = fieldSeverityMap.get(key) || "blocker";
     requirements.push({
       type: "field",
       key,
       met,
-      severity: "blocker",
+      severity,
       message: met ? `${key} provided` : `${key} is required`,
     });
   }
@@ -109,22 +181,24 @@ export function evaluateGate({
   for (const key of plan.requiredQuestionKeys) {
     const value = getValue(merged, key);
     const met = toRequiredQuestionMet(value);
+    const severity = questionSeverityMap.get(key) || "blocker";
     requirements.push({
       type: "question",
       key,
       met,
-      severity: "blocker",
+      severity,
       message: met ? `${key} confirmed` : `${key} must be confirmed`,
     });
   }
 
   for (const key of plan.requiredDocumentKeys) {
     const met = attachedDocuments.includes(key);
+    const severity = documentSeverityMap.get(key) || "blocker";
     requirements.push({
       type: "document",
       key,
       met,
-      severity: "blocker",
+      severity,
       message: met ? `${key} attached` : `${key} is required`,
     });
   }
