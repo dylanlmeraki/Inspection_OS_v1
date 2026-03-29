@@ -4,3 +4,4 @@ _exports/
 **/__pycache__/
 **/.pytest_cache/
 **/.venv/
+mirror-pack-agent/
